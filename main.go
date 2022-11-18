@@ -16,8 +16,9 @@ const (
 )
 
 var (
-	reg1 = regexp.MustCompile(".+`protobuf:\".+?\" json:\".+?\"`\\s*//.*?" + leftDelimiter + ".+?" + rightDelimiter + ".*")           // 待修正行正则
-	reg2 = regexp.MustCompile("(.+`protobuf:\".+?\" json:\".+?\"`)(\\s*//.*?)(" + leftDelimiter + "(.+?)" + rightDelimiter + ")(.*)") // reg2同reg1，仅多出子匹配
+	reg1        = regexp.MustCompile(".+`protobuf:\".+?\" json:\".+?\"`\\s*//.*?" + leftDelimiter + ".+?" + rightDelimiter + ".*")           // 正则：validate 标签
+	reg2        = regexp.MustCompile("(.+`protobuf:\".+?\" json:\".+?\"`)(\\s*//.*?)(" + leftDelimiter + "(.+?)" + rightDelimiter + ")(.*)") // reg2同reg1，仅多出子匹配
+	regEnumType = regexp.MustCompile(`^type (\S+) int32$`)                                                                                   // 正则：枚举定义
 )
 
 // getPbFiles 获取指定文件夹下所有后缀为 .pb.go 的文件路径。
@@ -51,25 +52,45 @@ func tidyPbFile(filePath string, done chan<- struct{}) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	lines := bytes.Split(fileBytes, []byte("\n"))
+	var (
+		lines        = bytes.Split(fileBytes, []byte("\n"))
+		regEnumConst *regexp.Regexp
+	)
 	for k, line := range lines {
-		if !reg1.Match(line) {
+		// validate 标签
+		if reg1.Match(line) {
+			subs := reg2.FindSubmatch(line)
+			newSub1 := [][]byte{
+				subs[1][:len(subs[1])-1],
+				[]byte(" validate:\""),
+				subs[4],
+				[]byte("\"`"),
+			}
+			subs[1] = bytes.Join(newSub1, nil)
+			newSubs := [][]byte{
+				subs[1],
+				subs[2],
+				subs[5],
+			}
+			lines[k] = bytes.Join(newSubs, nil)
 			continue
 		}
-		subs := reg2.FindSubmatch(line)
-		newSub1 := [][]byte{
-			subs[1][:len(subs[1])-1],
-			[]byte(" validate:\""),
-			subs[4],
-			[]byte("\"`"),
+		// 枚举
+		if regEnumConst == nil {
+			eSubs := regEnumType.FindSubmatch(line)
+			if len(eSubs) > 0 {
+				regEnumConst = regexp.MustCompile(`^(\s+?)` + string(eSubs[1]) + `_(\S+? ` + string(eSubs[1]) + ` = \d+)$`)
+			}
+		} else {
+			if len(line) == 1 {
+				if line[0] != ')' {
+					log.Fatal("pbtidy: assert ( failed")
+				}
+				regEnumConst = nil
+			} else {
+				lines[k] = regEnumConst.ReplaceAll(line, []byte("$1$2"))
+			}
 		}
-		subs[1] = bytes.Join(newSub1, nil)
-		newSubs := [][]byte{
-			subs[1],
-			subs[2],
-			subs[5],
-		}
-		lines[k] = bytes.Join(newSubs, nil)
 	}
 	newFileBytes := bytes.Join(lines, []byte("\n"))
 	err = ioutil.WriteFile(filePath, newFileBytes, fs.ModePerm)
